@@ -1,0 +1,2 @@
+# mobid
+ffxi mobid addon
