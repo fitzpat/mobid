@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - mobid.lua
+      - .github/workflows/release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mobid-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Download source at this commit
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          mkdir -p mobid
+          gh api -H 'Accept: application/vnd.github.raw+json' \
+            "repos/$GH_REPO/contents/mobid.lua?ref=$SOURCE_SHA" > mobid/mobid.lua
+
+      - name: Package addon
+        id: package
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+
+          source = Path('mobid/mobid.lua')
+          match = re.search(r"addon\.version\s*=\s*'([0-9]+(?:\.[0-9]+)*)'", source.read_text())
+          if match is None:
+              raise SystemExit('Missing or invalid addon.version')
+          with ZipFile('mobid.zip', 'w', compression=ZIP_DEFLATED) as archive:
+              archive.write(source, arcname='mobid/mobid.lua')
+          with ZipFile('mobid.zip') as archive:
+              assert archive.namelist() == ['mobid/mobid.lua']
+              assert archive.testzip() is None
+              assert archive.read('mobid/mobid.lua') == source.read_bytes()
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'tag=v{match.group(1)}\n')
+          PY
+
+      - name: Publish release
+        env:
+          RELEASE_TAG: ${{ steps.package.outputs.tag }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; leaving it unchanged."
+            exit 0
+          fi
+          cat > release-notes.md <<'NOTES'
+          Records defeated mobs' server IDs in Ashita chat logs.
+
+          - Mob ID lines are hidden in-game by default while remaining in log files.
+          - `/mobid chat [on|off]` controls visibility and saves the setting per character.
+          - `/mobid help` (or `/mobid ?`) lists commands and defaults.
+          - `/mobid test` emits a sample line to verify log capture.
+
+          Extract `mobid.zip` into your Ashita `addons` directory, then load `logs` and `mobid`.
+          If updating, run `/addon reload mobid`.
+
+          Addon author: **morrowindislong**.
+          NOTES
+          gh release create "$RELEASE_TAG" mobid.zip \
+            --target "$SOURCE_SHA" --title "mobid $RELEASE_TAG" \
+            --notes-file release-notes.md
